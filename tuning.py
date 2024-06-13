@@ -30,11 +30,24 @@ class TreeNode:
 
 
 class DecisionTree:
-    def __init__(self, max_depth=None, min_samples_split=2, feature_names=None):
+    def __init__(self, max_depth=None, split_function=None, min_samples_split=2, feature_names=None):
         self.max_depth = max_depth
+        self.split_function = split_function
         self.min_samples_split = min_samples_split
         self.root = None
         self.feature_names = feature_names
+
+    def get_params(self, deep=True):
+        return {
+            'max_depth': self.max_depth,
+            'min_samples_split': self.min_samples_split,
+            'feature_names': self.feature_names
+        }
+
+    def set_params(self, **params):
+        for param, value in params.items():
+            setattr(self, param, value)
+        return self
 
     def fit(self, X, y):
         # Ensure X, y are converted to numpy array
@@ -43,7 +56,7 @@ class DecisionTree:
         self.root = self._grow_tree(X, y)
 
     def _grow_tree(self, X, y, depth=0):
-        print("Depth grow tree:", depth)
+        #print("Depth grow tree:", depth)
         num_samples, num_features = X.shape
         if (depth >= self.max_depth) or (num_samples < self.min_samples_split) or (np.unique(y).size == 1):
             leaf_value = self._most_common_label(y)
@@ -67,7 +80,7 @@ class DecisionTree:
             X_column = X[:, feat_idx]
             thresholds = np.unique(X_column)
             for threshold in thresholds:
-                gain = self._information_gain(y, X_column, threshold)
+                gain = self._gain(y, X_column, threshold, criterion=self.split_function)
                 if gain > best_gain:
                     best_gain = gain
                     split_idx = feat_idx
@@ -79,22 +92,51 @@ class DecisionTree:
         right_idxs = np.argwhere(X_column > split_thresh).flatten()
         return left_idxs, right_idxs
 
-    def _information_gain(self, y, X_column, split_thresh):
-        parent_entropy = self._entropy(y)
+    def _gain(self, y, X_column, split_thresh, criterion):
+
+        if criterion == 'entropy':
+            parent_criterion = self._entropy(y)
+            criterion_func = self._entropy
+        elif criterion == 'gini':
+            parent_criterion = self._gini_impurity(y)
+            criterion_func = self._gini_impurity
+        else: raise ValueError(f"Unknown criterion: {criterion}")
+
         left_idxs, right_idxs = self._split(X_column, split_thresh)
         if len(left_idxs) == 0 or len(right_idxs) == 0:
             return 0
-        num_samples = len(y)
-        num_samples_left, num_samples_right = len(left_idxs), len(right_idxs)
-        e_left, e_right = self._entropy(y[left_idxs]), self._entropy(y[right_idxs])
-        child_entropy = (num_samples_left / num_samples) * e_left + (num_samples_right / num_samples) * e_right
-        ig = parent_entropy - child_entropy
-        return ig
+
+        y_left, y_right = y[left_idxs], y[right_idxs]
+        child_criterion = self._weighted_criterion(y_left, y_right, criterion_func)
+        gain = parent_criterion - child_criterion
+        return gain
+
+    def _weighted_criterion(self, y_left, y_right, criterion_func):
+        n = len(y_left) + len(y_right)
+        p_left = len(y_left) / n
+        p_right = len(y_right) / n
+        return p_left * criterion_func(y_left) + p_right * criterion_func(y_right)
+
 
     def _entropy(self, y):
         hist = np.bincount(y)
         ps = hist / len(y)
+        # scaled_ent = -np.sum((probabilities / 2) * np.log2(probabilities / 2 + 1e-10))
         return -np.sum([p * np.log2(p) for p in ps if p > 0])
+
+
+    #From class lecture it should be 2p(1-p) for binary classification, but let use the general formula for non-binary case
+    def _gini_impurity(self, y):
+        hist = np.bincount(y)
+        probabilities = hist / len(y)
+        gini = 1.0 - np.sum(probabilities ** 2)  # gini = np.sum(probabilities * (1 - probabilities))
+        return gini
+
+    def _weighted_gini_impurity(self, y_left, y_right):
+        n = len(y_left) + len(y_right)
+        p_left = len(y_left) / n
+        p_right = len(y_right) / n
+        return p_left * self._gini_impurity(y_left) + p_right * self._gini_impurity(y_right)
 
     def _most_common_label(self, y):
         return np.bincount(y).argmax()
@@ -173,7 +215,7 @@ if __name__ == '__main__':
     X = data_encoded.drop(['class_p', 'class_e'], axis=1)  # Assuming 'class_p' is the target
     y = data_encoded['class_p']  #.apply(lambda x: 1 if x == 'p' else 0)  # Convert 'p' to 1, 'e' to 0
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.8, random_state=42)
 
     print("Shape of X_train:", X_train.shape)
     print("Shape of y_train:", y_train.shape)
@@ -185,32 +227,50 @@ if __name__ == '__main__':
 
 
 
-
-
-
     # Instantiate the decision tree classifier
-    tree = DecisionTree(max_depth=5, min_samples_split=2, feature_names=X_train.columns)
+    #tree = DecisionTree(max_depth=5, min_samples_split=2, feature_names=X_train.columns)
 
-    # Fit the model
-    tree.fit(X_train.values, y_train.values)
+    # Definisci una griglia di iperparametri da esplorare
+    param_grid = {
+        'max_depth': [2, 3],
+        'split_function': ['gini', 'entropy'],
+    }
 
-    # Make predictions
-    y_pred = tree.predict(X_test.values)
-    print("\n\n")
+    # Crea un oggetto GridSearchCV
+    grid_search = GridSearchCV(estimator=DecisionTree(max_depth=None, split_function=None, min_samples_split=2, feature_names=X_train.columns), param_grid=param_grid, cv=2, scoring='accuracy', verbose=3)
 
-    # Evaluate the model
-    accuracy = accuracy_score(y_test, y_pred)
-    print(f"Accuracy: {accuracy:.4f}")
+    # Esegui il tuning sugli iperparametri usando i dati di addestramento
+    grid_search.fit(X_train.values, y_train.values)
+
+    # Ottieni i risultati completi della grid search
+    results = grid_search.cv_results_
+    print("Grid Search Results:")
+    for mean_score, params in zip(results['mean_test_score'], results['params']):
+        print(f"Mean Accuracy: {mean_score:.4f} with params: {params}")
+
+    # Ottieni i migliori iperparametri trovati
+    best_params = grid_search.best_params_
+    print("Best Hyperparameters:", best_params)
+
+    # Addestra un nuovo modello con i migliori iperparametri trovati
+    #best_tree = DecisionTree(max_depth=best_params['max_depth']), #other parameters
+    #best_tree.fit(X_train.values, y_train.values)
+
+    # Valuta il modello ottimizzato
+    #y_pred = best_tree.predict(X_test.values)
+    #accuracy = accuracy_score(y_test, y_pred)
+    #print(f"Accuracy on test set with best params: {accuracy:.4f}")
+
+
+
+
     print("\n\n")
 
     # Print the tree
-    tree.print_tree()
+    #tree.print_tree()
 
     # Visualize the tree
-    dot = Digraph()
-    dot = tree.visualize_tree(dot)
-    dot.render('mushroom_tree', format='png', view=True)
-
-
-
+    #dot = Digraph()
+    #dot = tree.visualize_tree(dot)
+    #dot.render('mushroom_tree', format='png', view=True)
 
