@@ -1,8 +1,9 @@
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import make_scorer, confusion_matrix, accuracy_score
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
-from sklearn.model_selection import GridSearchCV
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 from graphviz import Digraph
 
@@ -30,16 +31,20 @@ class TreeNode:
 
 
 class DecisionTree:
-    def __init__(self, max_depth=None, split_function=None, min_samples_split=2, feature_names=None):
+    def __init__(self, max_depth=None, max_leaf_nodes=None, split_function=None, min_samples_split=2, feature_names=None):
         self.max_depth = max_depth
+        self.max_leaf_nodes = max_leaf_nodes
         self.split_function = split_function
         self.min_samples_split = min_samples_split
         self.root = None
         self.feature_names = feature_names
+        self.leaf_count = 0
 
     def get_params(self, deep=True):
         return {
             'max_depth': self.max_depth,
+            'max_leaf_nodes': self.max_leaf_nodes,
+            'split_function': self.split_function,
             'min_samples_split': self.min_samples_split,
             'feature_names': self.feature_names
         }
@@ -49,16 +54,20 @@ class DecisionTree:
             setattr(self, param, value)
         return self
 
+    def _count_leaves(self, node):
+        if node is None:
+            return 0
+        if node.is_leaf():
+            return 1
+        return self._count_leaves(node.left) + self._count_leaves(node.right)
+
     def fit(self, X, y):
-        # Ensure X, y are converted to numpy array
-        X = np.array(X)
-        y = np.array(y)
         self.root = self._grow_tree(X, y)
 
     def _grow_tree(self, X, y, depth=0):
-        #print("Depth grow tree:", depth)
         num_samples, num_features = X.shape
-        if (depth >= self.max_depth) or (num_samples < self.min_samples_split) or (np.unique(y).size == 1):
+
+        if (self.max_depth is not None and depth >= self.max_depth) or (self.max_leaf_nodes is not None and self.leaf_count >= self.max_leaf_nodes) or (num_samples < self.min_samples_split) or (np.unique(y).size == 1):
             leaf_value = self._most_common_label(y)
             return TreeNode(value=leaf_value)
 
@@ -68,6 +77,7 @@ class DecisionTree:
             leaf_value = self._most_common_label(y)
             return TreeNode(value=leaf_value)
 
+        self.leaf_count += 1
         left_idxs, right_idxs = self._split(X[:, best_feat], best_thresh)
         left = self._grow_tree(X[left_idxs, :], y[left_idxs], depth + 1)
         right = self._grow_tree(X[right_idxs, :], y[right_idxs], depth + 1)
@@ -93,14 +103,14 @@ class DecisionTree:
         return left_idxs, right_idxs
 
     def _gain(self, y, X_column, split_thresh, criterion):
+        criterion_func = {
+            'scaled_entropy': self._scaled_entropy,
+            'gini': self._gini_impurity,
+            'squared': self._squared_impurity,
+            'misclassification': self._misclassification
+        }.get(criterion)
 
-        if criterion == 'entropy':
-            parent_criterion = self._entropy(y)
-            criterion_func = self._entropy
-        elif criterion == 'gini':
-            parent_criterion = self._gini_impurity(y)
-            criterion_func = self._gini_impurity
-        else: raise ValueError(f"Unknown criterion: {criterion}")
+        parent_criterion = criterion_func(y)
 
         left_idxs, right_idxs = self._split(X_column, split_thresh)
         if len(left_idxs) == 0 or len(right_idxs) == 0:
@@ -117,26 +127,34 @@ class DecisionTree:
         p_right = len(y_right) / n
         return p_left * criterion_func(y_left) + p_right * criterion_func(y_right)
 
-
-    def _entropy(self, y):
+    # From class lectures scaled_ent = - (p/2)*np.log2(p) - ((1-p)/2)*np.log2(1-p) for binary classification
+    def _scaled_entropy(self, y):
         hist = np.bincount(y)
-        ps = hist / len(y)
-        # scaled_ent = -np.sum((probabilities / 2) * np.log2(probabilities / 2 + 1e-10))
-        return -np.sum([p * np.log2(p) for p in ps if p > 0])
+        probs = hist / len(y)
+        scaled_ent = -np.sum([(p / 2) * np.log2(p) for p in probs if p > 0])
+        return scaled_ent
 
-
-    #From class lecture it should be 2p(1-p) for binary classification, but let use the general formula for non-binary case
+    #From class lectures it should be 2p(1-p) for binary classification, but let use the general formula for non-binary case
     def _gini_impurity(self, y):
         hist = np.bincount(y)
-        probabilities = hist / len(y)
-        gini = 1.0 - np.sum(probabilities ** 2)  # gini = np.sum(probabilities * (1 - probabilities))
+        probs = hist / len(y)
+        gini = 1.0 - np.sum(probs ** 2)  # gini = np.sum(probs * (1 - probs))
         return gini
 
-    def _weighted_gini_impurity(self, y_left, y_right):
-        n = len(y_left) + len(y_right)
-        p_left = len(y_left) / n
-        p_right = len(y_right) / n
-        return p_left * self._gini_impurity(y_left) + p_right * self._gini_impurity(y_right)
+    def _misclassification(self, y):
+        hist = np.bincount(y)
+        probs = hist / len(y)
+        mce = 1.0 - np.max(probs)
+        return mce
+
+    #for binary classification    sqrt(p*(1-p))
+    def _squared_impurity(self, y):
+        hist = np.bincount(y)
+        probs = hist / len(y)
+        epsilon = 1e-10  # Small constant to avoid multiplying by zero
+        sqr = np.sum(np.sqrt((probs + epsilon) * (1 - probs + epsilon)))
+        return sqr
+
 
     def _most_common_label(self, y):
         return np.bincount(y).argmax()
@@ -198,6 +216,9 @@ class DecisionTree:
 
 
 
+def zero_one_loss(y_true, y_pred):
+    return np.mean(y_true != y_pred)
+
 
 
 if __name__ == '__main__':
@@ -215,29 +236,40 @@ if __name__ == '__main__':
     X = data_encoded.drop(['class_p', 'class_e'], axis=1)  # Assuming 'class_p' is the target
     y = data_encoded['class_p']  #.apply(lambda x: 1 if x == 'p' else 0)  # Convert 'p' to 1, 'e' to 0
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.8, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     print("Shape of X_train:", X_train.shape)
     print("Shape of y_train:", y_train.shape)
     print("Shape of X_test:", X_test.shape)
     print("Shape of y_test:", y_test.shape)
 
-
-
-
-
-
     # Instantiate the decision tree classifier
     #tree = DecisionTree(max_depth=5, min_samples_split=2, feature_names=X_train.columns)
 
-    # Definisci una griglia di iperparametri da esplorare
-    param_grid = {
-        'max_depth': [2, 3],
-        'split_function': ['gini', 'entropy'],
-    }
+
+
+
+
+
+
+
+
+
+    param_grid = [
+        {
+            'max_depth': [5, 10, 20, 50, 100, 200, 500, 1000],
+            'split_function': ['scaled_entropy', 'gini', 'squared']
+        },
+        {
+            'max_leaf_nodes': [5, 50, 100, 200, 500, 1000, 2000, 5000],
+            'split_function': ['scaled_entropy', 'gini', 'squared']
+        }
+    ]
+
+    custom_scorer = make_scorer(zero_one_loss, greater_is_better=False)
 
     # Crea un oggetto GridSearchCV
-    grid_search = GridSearchCV(estimator=DecisionTree(max_depth=None, split_function=None, min_samples_split=2, feature_names=X_train.columns), param_grid=param_grid, cv=2, scoring='accuracy', verbose=3)
+    grid_search = GridSearchCV(estimator=DecisionTree(max_depth=None, max_leaf_nodes=None, split_function=None, min_samples_split=2, feature_names=X_train.columns), param_grid=param_grid, cv=3, scoring=custom_scorer, verbose=3)
 
     # Esegui il tuning sugli iperparametri usando i dati di addestramento
     grid_search.fit(X_train.values, y_train.values)
@@ -250,16 +282,63 @@ if __name__ == '__main__':
 
     # Ottieni i migliori iperparametri trovati
     best_params = grid_search.best_params_
-    print("Best Hyperparameters:", best_params)
+    print("\nBest Hyperparameters:", best_params)
 
+    #Addestra un nuovo modello con i migliori iperparametri trovati
+    best_tree = DecisionTree(
+        max_depth=best_params.get('max_depth'),
+        max_leaf_nodes=best_params.get('max_leaf_nodes'),
+        split_function=best_params['split_function'],
+        min_samples_split=2,  # This is fixed as per the original configuration
+        feature_names=X_train.columns
+    )
+
+    """
+    
     # Addestra un nuovo modello con i migliori iperparametri trovati
-    #best_tree = DecisionTree(max_depth=best_params['max_depth']), #other parameters
-    #best_tree.fit(X_train.values, y_train.values)
+    best_tree = DecisionTree(
+        max_depth=None,
+        max_leaf_nodes=5000,
+        split_function="scaled_entropy",
+        min_samples_split=2,  # This is fixed as per the original configuration
+        feature_names=X_train.columns
+    )
+    """
 
-    # Valuta il modello ottimizzato
-    #y_pred = best_tree.predict(X_test.values)
-    #accuracy = accuracy_score(y_test, y_pred)
-    #print(f"Accuracy on test set with best params: {accuracy:.4f}")
+    best_tree.fit(X_train.values, y_train.values)
+
+    # Make predictions on the training data
+    y_pred = best_tree.predict(X_train.values)
+
+    # Evaluate the model on the training data
+    accuracy = accuracy_score(y_train, y_pred)
+    print(f"\nAccuracy: {accuracy:.4f}")
+
+
+
+    # Predict on the testing data
+    y_test_pred = best_tree.predict(X_test.values)
+
+    # Evaluate the model on the training data
+    accuracy = accuracy_score(y_test, y_test_pred)
+    print(f"\nAccuracy: {accuracy:.4f}")
+
+    # Compute the zero-one loss
+    train_error = zero_one_loss(y_test.values, y_test_pred)
+
+    print(f"zero one loss on test set with best params: {train_error:.4f}")
+
+    # Compute the confusion matrix
+    conf_matrix = confusion_matrix(y_test.values, y_test_pred)
+
+    # Plot the confusion matrix
+    plt.figure(figsize=(10, 7))
+    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=['Class 0', 'Class 1'],
+                yticklabels=['Class 0', 'Class 1'])
+    plt.xlabel('Predicted')
+    plt.ylabel('Actual')
+    plt.title('Confusion Matrix')
+    plt.show()
 
 
 
@@ -270,7 +349,7 @@ if __name__ == '__main__':
     #tree.print_tree()
 
     # Visualize the tree
-    #dot = Digraph()
-    #dot = tree.visualize_tree(dot)
-    #dot.render('mushroom_tree', format='png', view=True)
+    dot = Digraph()
+    dot = best_tree.visualize_tree(dot)
+    dot.render('png/mushroom_tree', format='png', view=True)
 
